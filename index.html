@@ -225,7 +225,6 @@ function palette(m){
 }
 function rgb(c,a=1){return `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`}
 function lerpColor(a,b,t){return a.map((v,i)=>mix(v,b[i],t))}
-function lerpColorWithA(a,b,t){return [mix(a[0],b[0],t),mix(a[1],b[1],t),mix(a[2],b[2],t),mix(a[3],b[3],t)]}
 function daylight(m){return clamp((Math.sin((m/1440)*TAU-Math.PI/2)+1)/2)}
 function sunriseFactor(m){return Math.exp(-Math.pow((m-375)/70,2))}
 function sunsetFactor(m){return Math.exp(-Math.pow((m-1090)/80,2))}
@@ -281,319 +280,6 @@ const glitterParticles=Array.from({length:GLITTER_COUNT},(_,i)=>({
   phase:randSeed(i*23+7607)*TAU,
   len:3+randSeed(i*29+7823)*12
 }));
-
-let lastCelestials=null;
-
-/* ─── clouds system (shared sky, offscreen canvases) ──────────────── */
-const CUMULUS_COUNT=8;
-const cumulusClouds=[];
-let cloudUpdateIdx=0;
-
-function initCumulusClouds(){
-  for(let i=0;i<CUMULUS_COUNT;i++){
-    const v=i/(CUMULUS_COUNT-1); // 0=overhead, 1=near horizon
-    const yFrac=0.07+v*0.42;     // 0.07 to 0.49
-    const scale=1.45-v*1.0;      // 1.45 down to 0.45 (perspective)
-    const speedMultiplier=1.1-v*0.65; // overhead faster, distant slower
-    const baseW=Math.round(400*scale);
-    const baseH=Math.round(190*scale);
-
-    const puffCount=10+Math.floor(randSeed(i*23+81)*9); // 10 to 18 puffs
-    const puffs=[];
-    for(let j=0;j<puffCount;j++){
-      const pj=j/(puffCount-1);
-      const r=(26+randSeed(i*41+j*17+5)*36)*scale;
-      const cx=(0.20+0.60*pj+(randSeed(i*47+j*19)-0.5)*0.22)*baseW;
-      const cy=(0.48+(randSeed(i*53+j*23)-0.38)*0.36)*baseH;
-      const isBase=cy>baseH*0.54;
-      const morphPhase=randSeed(i*59+j*31)*TAU;
-      const morphSpeed=0.10+randSeed(i*67+j*37)*0.16;
-      puffs.push({cx,cy,r,isBase,morphPhase,morphSpeed});
-    }
-
-    const oc=document.createElement('canvas');
-    oc.width=Math.max(64,baseW);
-    oc.height=Math.max(48,baseH);
-    const octx=oc.getContext('2d');
-
-    cumulusClouds.push({
-      xNorm:(i*0.14+randSeed(i*71)*0.09)%1.2-0.1,
-      yFrac,
-      scale,
-      speedMultiplier,
-      baseW,
-      baseH,
-      puffs,
-      canvas:oc,
-      ctx:octx
-    });
-  }
-}
-initCumulusClouds();
-
-function getCloudColors(m,day,warm,golden,night,sunrise,sunset,cloudXNorm,cel){
-  // Daytime noon: bright white tops, pale blue-grey undersides (not pure grey)
-  const noonTop=[255,255,255,0.96];
-  const noonMid=[226,236,248,0.90];
-  const noonBot=[178,196,218,0.86];
-
-  // Sunrise: warm peach tops, glowing orange-gold undersides
-  const riseTop=[255,236,205,0.96];
-  const riseMid=[255,185,120,0.92];
-  const riseBot=[255,130,60,0.90];
-
-  // Sunset: apricot tops, vivid pink/coral/orange undersides
-  const setTop=[255,218,185,0.96];
-  const setMid=[255,145,110,0.92];
-  const setBot=[242,92,75,0.90];
-
-  // Blue hour: dusty rose tops, dusty violet-navy undersides
-  const blueHourFactor=Math.max(
-    Math.exp(-Math.pow((m-1175)/32,2)),
-    Math.exp(-Math.pow((m-315)/28,2))
-  );
-  const bhTop=[170,130,160,0.85];
-  const bhMid=[120,100,135,0.82];
-  const bhBot=[68,62,98,0.82];
-
-  // Night: dark navy clouds
-  const nightTop=[24,34,56,0.86];
-  const nightMid=[16,24,44,0.88];
-  const nightBot=[10,16,32,0.88];
-
-  // Moon silver edge effect at night
-  let silverBonus=0;
-  if(cel&&cel.moonFade>0.05){
-    const cloudScreenX=cloudXNorm*W;
-    const distToMoon=Math.abs(cloudScreenX-cel.moonX)/W;
-    if(distToMoon<0.30){
-      silverBonus=(1-distToMoon/0.30)*cel.moonFade*0.48;
-    }
-  }
-
-  // Sun proximity brightness boost
-  let sunProximity=0;
-  if(cel&&cel.sunFadeV>0.05&&warm>0.05){
-    const cloudScreenX=cloudXNorm*W;
-    const distToSun=Math.abs(cloudScreenX-cel.sunX)/W;
-    if(distToSun<0.35){
-      sunProximity=(1-distToSun/0.35)*warm;
-    }
-  }
-
-  // Start with night baseline
-  let curTop=[...nightTop];
-  let curMid=[...nightMid];
-  let curBot=[...nightBot];
-
-  // Blend in Blue Hour
-  if(blueHourFactor>0.01){
-    curTop=lerpColorWithA(curTop,bhTop,blueHourFactor);
-    curMid=lerpColorWithA(curMid,bhMid,blueHourFactor);
-    curBot=lerpColorWithA(curBot,bhBot,blueHourFactor);
-  }
-
-  // Blend in Sunrise
-  if(sunrise>0.01){
-    curTop=lerpColorWithA(curTop,riseTop,sunrise);
-    curMid=lerpColorWithA(curMid,riseMid,sunrise);
-    curBot=lerpColorWithA(curBot,riseBot,sunrise);
-  }
-
-  // Blend in Sunset
-  if(sunset>0.01){
-    curTop=lerpColorWithA(curTop,setTop,sunset);
-    curMid=lerpColorWithA(curMid,setMid,sunset);
-    curBot=lerpColorWithA(curBot,setBot,sunset);
-  }
-
-  // Blend in Daytime
-  const dayWeight=clamp(day-warm*0.5-blueHourFactor*0.4);
-  if(dayWeight>0.01){
-    curTop=lerpColorWithA(curTop,noonTop,dayWeight);
-    curMid=lerpColorWithA(curMid,noonMid,dayWeight);
-    curBot=lerpColorWithA(curBot,noonBot,dayWeight);
-  }
-
-  // Sun proximity boost (golden edges)
-  if(sunProximity>0.01){
-    const glowCol=[255,230,160,0.98];
-    curTop=lerpColorWithA(curTop,glowCol,sunProximity*0.5);
-  }
-
-  // Silver moon edge
-  if(silverBonus>0.01){
-    const silvCol=[205,222,255,0.92];
-    curTop=lerpColorWithA(curTop,silvCol,silverBonus);
-  }
-
-  return {
-    topColor:`rgba(${curTop[0]|0},${curTop[1]|0},${curTop[2]|0},${curTop[3].toFixed(2)})`,
-    midColor:`rgba(${curMid[0]|0},${curMid[1]|0},${curMid[2]|0},${curMid[3].toFixed(2)})`,
-    botColor:`rgba(${curBot[0]|0},${curBot[1]|0},${curBot[2]|0},${curBot[3].toFixed(2)})`
-  };
-}
-
-function updateOneCloudCanvas(cloud,t,m,day,warm,golden,night,sunrise,sunset,cel){
-  const octx=cloud.ctx;
-  const cw=cloud.canvas.width;
-  const ch=cloud.canvas.height;
-  octx.clearRect(0,0,cw,ch);
-
-  const colors=getCloudColors(m,day,warm,golden,night,sunrise,sunset,cloud.xNorm,cel);
-
-  for(let j=0;j<cloud.puffs.length;j++){
-    const pf=cloud.puffs[j];
-    const morph=REDUCED?0:Math.sin(t*pf.morphSpeed+pf.morphPhase);
-    const curR=pf.r*(1+0.05*morph);
-    const curX=pf.cx+pf.r*0.035*Math.cos(t*pf.morphSpeed+pf.morphPhase);
-    const curY=pf.cy;
-
-    octx.save();
-    if(pf.isBase){
-      octx.translate(curX,curY);
-      octx.scale(1.22,0.80);
-      octx.translate(-curX,-curY);
-    }
-
-    const lightShiftY=curR*0.30;
-    const grad=octx.createRadialGradient(curX,curY-lightShiftY,curR*0.08,curX,curY,curR);
-    grad.addColorStop(0,colors.topColor);
-    grad.addColorStop(0.50,colors.midColor);
-    grad.addColorStop(0.85,colors.botColor);
-    grad.addColorStop(1,'rgba(0,0,0,0)');
-
-    octx.fillStyle=grad;
-    octx.beginPath();
-    octx.arc(curX,curY,curR,0,TAU);
-    octx.fill();
-    octx.restore();
-  }
-}
-
-function drawCirrusStreaks(m,day,warm,sunrise,sunset,horizonY,now){
-  const t=now*0.0004;
-  const motionScale=REDUCED?0.05:1;
-  const streaks=[
-    {yFrac:0.07,wFrac:0.58,drift:0.008,tilt:-0.02},
-    {yFrac:0.13,wFrac:0.68,drift:0.006,tilt:0.015},
-    {yFrac:0.19,wFrac:0.48,drift:0.010,tilt:-0.01}
-  ];
-
-  let cr=255,cg=255,cb=255,ca=0.20*day;
-  if(warm>0.05){
-    cr=255;
-    cg=Math.round(mix(255,170,warm));
-    cb=Math.round(mix(255,120,warm));
-    ca=mix(ca,0.34,warm);
-  } else if(day<0.3){
-    cr=165;cg=185;cb=230;ca=0.09;
-  }
-  if(ca<0.015)return;
-
-  ctx.save();
-  for(let i=0;i<streaks.length;i++){
-    const s=streaks[i];
-    const cy=s.yFrac*horizonY;
-    const cx=(((t*s.drift*motionScale+i*0.35)%1.5)-0.25)*W;
-    const sw=s.wFrac*W;
-    const sh=12+i*4;
-
-    ctx.save();
-    ctx.translate(cx,cy);
-    ctx.rotate(s.tilt);
-    const grad=ctx.createLinearGradient(-sw*0.5,0,sw*0.5,0);
-    grad.addColorStop(0,`rgba(${cr},${cg},${cb},0)`);
-    grad.addColorStop(0.2,`rgba(${cr},${cg},${cb},${ca*0.65})`);
-    grad.addColorStop(0.5,`rgba(${cr},${cg},${cb},${ca})`);
-    grad.addColorStop(0.8,`rgba(${cr},${cg},${cb},${ca*0.55})`);
-    grad.addColorStop(1,`rgba(${cr},${cg},${cb},0)`);
-
-    ctx.fillStyle=grad;
-    ctx.beginPath();
-    ctx.moveTo(-sw*0.5,0);
-    ctx.bezierCurveTo(-sw*0.2,-sh*0.5,sw*0.2,sh*0.5,sw*0.5,0);
-    ctx.bezierCurveTo(sw*0.2,sh*0.3,-sw*0.2,-sh*0.3,-sw*0.5,0);
-    ctx.fill();
-    ctx.restore();
-  }
-  ctx.restore();
-}
-
-function drawHorizonCloudBank(horizonY,warm,sunset,sunrise,day,night,now){
-  const t=now*0.0005;
-  const motionScale=REDUCED?0.05:1;
-  const bankH=H*0.048;
-  const topY=horizonY-bankH;
-
-  let topR=242,topG=246,topB=255,topA=0.68;
-  let botR=185,botG=202,botB=222,botA=0.86;
-
-  if(warm>0.05){
-    if(sunset>sunrise){
-      topR=255;topG=Math.round(mix(246,160,warm));topB=Math.round(mix(255,120,warm));
-      botR=220;botG=Math.round(mix(202,85,warm)); botB=Math.round(mix(222,75,warm));
-    } else {
-      topR=255;topG=Math.round(mix(246,190,warm));topB=Math.round(mix(255,140,warm));
-      botR=232;botG=Math.round(mix(202,115,warm));botB=Math.round(mix(222,65,warm));
-    }
-  } else if(night>0.3){
-    topR=22;topG=32;topB=54;topA=0.72;
-    botR=12;botG=18;botB=34;botA=0.86;
-  }
-
-  const grad=ctx.createLinearGradient(0,topY,0,horizonY);
-  grad.addColorStop(0,`rgba(${topR},${topG},${topB},${topA})`);
-  grad.addColorStop(0.55,`rgba(${botR},${botG},${botB},${botA})`);
-  grad.addColorStop(1,`rgba(${botR},${botG},${botB},${botA})`);
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(0,horizonY);
-
-  const steps=40;
-  for(let i=0;i<=steps;i++){
-    const x=(i/steps)*W;
-    const nx=x/W;
-    const puff=Math.sin(nx*15+t*0.8*motionScale)*(bankH*0.28)
-              +Math.sin(nx*28+1.2)*(bankH*0.18)
-              +Math.sin(nx*45+2.4)*(bankH*0.10);
-    const py=topY+bankH*0.28-puff;
-    ctx.lineTo(x,py);
-  }
-  ctx.lineTo(W,horizonY);
-  ctx.closePath();
-  ctx.fillStyle=grad;
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawSkyClouds(now,m,p,day,warm,golden,night,sunrise,sunset,horizonY,cel){
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0,0,W,horizonY);
-  ctx.clip();
-
-  drawCirrusStreaks(m,day,warm,sunrise,sunset,horizonY,now);
-  drawHorizonCloudBank(horizonY,warm,sunset,sunrise,day,night,now);
-
-  // Cumulus clouds
-  for(let i=0;i<cumulusClouds.length;i++){
-    const c=cumulusClouds[i];
-    const sx=c.xNorm*W;
-    const sy=c.yFrac*horizonY;
-    const dw=c.baseW;
-    const dh=c.baseH;
-
-    ctx.drawImage(c.canvas,sx-dw*0.5,sy-dh*0.5,dw,dh);
-    if(sx-dw*0.5<0){
-      ctx.drawImage(c.canvas,sx-dw*0.5+W*1.2,sy-dh*0.5,dw,dh);
-    } else if(sx+dw*0.5>W){
-      ctx.drawImage(c.canvas,sx-dw*0.5-W*1.2,sy-dh*0.5,dw,dh);
-    }
-  }
-  ctx.restore();
-}
 
 /* ─── mountain helper ─────────────────────────────────────────────── */
 function drawMountain(points,base,glow,alpha=1){
@@ -653,8 +339,7 @@ function drawCelestials(now,m,p,day,warm,horizonY){
     ctx.beginPath();ctx.arc(moonX,moonY,r,0,TAU);ctx.fillStyle=`rgba(242,244,255,${moonFade})`;ctx.fill();
     ctx.beginPath();ctx.arc(moonX-r*.22,moonY-r*.1,r*.82,0,TAU);ctx.fillStyle=`rgba(197,211,244,${.12*moonFade})`;ctx.fill();
   }
-  lastCelestials={sunX,sunY,sunElev,sunFadeV,sunVisible,moonX,moonY,moonFade,moonUp,moonProgress};
-  return lastCelestials;
+  return {sunX,sunY,sunElev,sunFadeV,sunVisible,moonX,moonY,moonFade,moonUp,moonProgress};
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -727,10 +412,7 @@ function renderMountain(now,m,p,day,warm,golden,night,sunrise,sunset,alpha,slide
   ctx.restore();
 
   // Celestials
-  const cel=drawCelestials(now,m,p,day,warm,horizonY);
-
-  // Shared sky clouds (behind mountains)
-  drawSkyClouds(now,m,p,day,warm,golden,night,sunrise,sunset,horizonY,cel);
+  drawCelestials(now,m,p,day,warm,horizonY);
 
   // Mountains
   const ridge1=[[0,.79],[.08,.75],[.16,.77],[.26,.72],[.34,.76],[.45,.70],[.55,.75],[.66,.73],[.77,.78],[.87,.73],[1,.76]];
@@ -854,10 +536,7 @@ function renderShip(now,m,p,day,warm,golden,night,sunrise,sunset,alpha,slideX){
   /* ── 3. Celestials (Sun / Moon) ───────────────────────────────── */
   const cel=drawCelestials(now,m,p,day,warm,horizonY);
 
-  /* ── 4. Shared sky clouds ─────────────────────────────────────── */
-  drawSkyClouds(now,m,p,day,warm,golden,night,sunrise,sunset,horizonY,cel);
-
-  /* ── 5. Horizon & Ocean Layers (with subtle pitch/roll) ───────── */
+  /* ── 4. Horizon & Ocean Layers (with subtle pitch/roll) ───────── */
   ctx.save();
   // Tilts gently around the vanishing point
   ctx.translate(vpX,horizonY);
@@ -1539,32 +1218,6 @@ function render(now){
 function frame(now){
   const dt=Math.min(100,now-last);last=now;
   minute=(minute+dt*0.024)%1440;
-
-  // Cloud drift (crossing in 3-4 minutes)
-  const motionScale=REDUCED?0.05:1;
-  for(let i=0;i<cumulusClouds.length;i++){
-    const c=cumulusClouds[i];
-    c.xNorm+=(dt/210000)*c.speedMultiplier*motionScale;
-    if(c.xNorm>1.25) c.xNorm-=1.45;
-  }
-
-  // Pre-render round robin: update 1 cloud offscreen canvas per frame
-  if(cumulusClouds.length>0){
-    const cloudToUpdate=cumulusClouds[cloudUpdateIdx];
-    updateOneCloudCanvas(
-      cloudToUpdate,
-      now*0.001,
-      minute,
-      daylight(minute),
-      warmFactor(minute),
-      goldenFactor(minute),
-      1-sunFactor(minute),
-      sunriseFactor(minute),
-      sunsetFactor(minute),
-      lastCelestials
-    );
-    cloudUpdateIdx=(cloudUpdateIdx+1)%cumulusClouds.length;
-  }
 
   // Ease viewBlend toward currentView (1.2 s)
   const target=currentView;
